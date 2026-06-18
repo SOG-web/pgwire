@@ -6,10 +6,73 @@ A PostgreSQL wire protocol library for Zig. Building blocks for building Postgre
 
 Early development. Public API is not yet finalized. 75 unit tests passing.
 
+## Requirements
+
+- Zig 0.16.0+
+
+## Installation
+
+```sh
+zig fetch --save "git+https://github.com/SOG-web/pgwire#master"
+```
+
+Then add the dependency to your `build.zig`:
+
+```zig
+const pgwire_dep = b.dependency("pgwire", .{
+    .target = target,
+    .optimize = optimize,
+});
+```
+
+## Usage
+
+```zig
+const pgwire = @import("pgwire");
+const msg = pgwire.server.message;
+const ConnectionState = pgwire.server.connection.ConnectionState;
+
+// Read a startup message from a client connection
+const startup = try msg.readStartupMessage(reader, alloc);
+
+// Authenticate
+try msg.sendAuthOk(writer);
+
+// Send query results
+try msg.sendRowDescription(writer, &columns);
+try msg.sendDataRow(writer, &row);
+try msg.sendCommandComplete(writer, "SELECT 1");
+try msg.sendReadyForQuery(writer, .idle);
+```
+
+See `src/main.zig` for a full working example.
+
 ## Building
 
 ```sh
 zig build
+```
+
+### Build options
+
+| Option | Default | Description |
+|---|---|---|
+| `use_llvm` | `true` | Force using LLVM as the codegen backend |
+| `use_lld` | `true` | Force using LLD as the linker |
+
+### Cross-compilation
+
+```sh
+zig build -Dtarget=aarch64-linux-gnu
+zig build -Dtarget=x86_64-macos
+```
+
+### Build steps
+
+```sh
+zig build run       # Run the test server
+zig build test      # Run all tests
+zig build --help    # List all available steps
 ```
 
 ## Running tests
