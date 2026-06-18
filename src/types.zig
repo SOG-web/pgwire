@@ -235,6 +235,29 @@ pub const ErrorSeverity = struct {
     pub const log = "LOG";
 };
 
+// ─── Error/Notice field type bytes ─────────────────────────────────
+// Used in ErrorResponse and NoticeResponse message payloads.
+
+pub const ErrorFieldType = struct {
+    pub const severity = 'S'; // always present
+    pub const sqlstate = 'C'; // always present
+    pub const message = 'M'; // always present
+    pub const detail = 'D';
+    pub const hint = 'H';
+    pub const position = 'P';
+    pub const internal_position = 'p';
+    pub const internal_query = 'q';
+    pub const context = 'W';
+    pub const schema = 's';
+    pub const table = 't';
+    pub const column = 'c';
+    pub const data_type = 'd';
+    pub const constraint = 'n';
+    pub const file = 'F';
+    pub const line = 'L';
+    pub const routine = 'R';
+};
+
 // ─── Common error codes (SQLSTATE) ─────────────────────────────────
 
 pub const ErrorCode = struct {
@@ -672,7 +695,7 @@ pub const ColumnDesc = struct {
 
 pub const Message = struct {
     type: u8,
-    payload: []u8,
+    payload: []const u8,
 };
 
 pub const StartupMessage = struct {

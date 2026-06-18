@@ -64,7 +64,7 @@ fn handleClient(io: Io, stream: Io.net.Stream) Io.Cancelable!void {
 
         if (startup.version == types.SSL_REQUEST_CODE) {
             std.log.info("SSLRequest received, declining", .{});
-            msg.declineSSL(&writer.interface);
+            msg.declineSSL(&writer.interface) catch return;
             writer.interface.flush() catch return;
             continue;
         }
@@ -74,7 +74,6 @@ fn handleClient(io: Io, stream: Io.net.Stream) Io.Cancelable!void {
             return;
         }
 
-        // Parse startup parameters
         var pos: usize = 0;
         while (pos < startup.params.len) {
             const key_end = std.mem.indexOfScalar(u8, startup.params[pos..], 0) orelse break;
@@ -89,13 +88,13 @@ fn handleClient(io: Io, stream: Io.net.Stream) Io.Cancelable!void {
         std.log.info("user: {s}, database: {s}", .{ conn_state.getCurrentUser(), conn_state.getCurrentDatabase() });
         conn_state.authenticate(types.PROTOCOL_VERSION_3_0);
 
-        msg.sendAuthOk(&writer.interface);
-        msg.sendParameterStatus(&writer.interface, "server_version", "0.0.0");
-        msg.sendParameterStatus(&writer.interface, "server_encoding", "UTF8");
-        msg.sendParameterStatus(&writer.interface, "client_encoding", "UTF8");
-        msg.sendParameterStatus(&writer.interface, "datestyle", "ISO");
-        msg.sendBackendKeyData(&writer.interface, conn_state.backend_pid, conn_state.backend_secret);
-        msg.sendReadyForQuery(&writer.interface, conn_state.transaction_status);
+        msg.sendAuthOk(&writer.interface) catch return;
+        msg.sendParameterStatus(&writer.interface, "server_version", "0.0.0") catch return;
+        msg.sendParameterStatus(&writer.interface, "server_encoding", "UTF8") catch return;
+        msg.sendParameterStatus(&writer.interface, "client_encoding", "UTF8") catch return;
+        msg.sendParameterStatus(&writer.interface, "datestyle", "ISO") catch return;
+        msg.sendBackendKeyData(&writer.interface, conn_state.backend_pid, conn_state.backend_secret) catch return;
+        msg.sendReadyForQuery(&writer.interface, conn_state.transaction_status) catch return;
         writer.interface.flush() catch return;
         break;
     }
@@ -111,14 +110,17 @@ fn handleClient(io: Io, stream: Io.net.Stream) Io.Cancelable!void {
                 std.log.info("query: {s}", .{query});
                 conn_state.incrementQueryCount();
                 conn_state.detectTransactionCommand(query);
-                handleQuery(&writer.interface, &conn_state, query);
+                handleQuery(&writer.interface, &conn_state, query) catch |err| {
+                    std.log.err("write error: {}", .{err});
+                    return;
+                };
             },
             types.MessageType.terminate => {
                 std.log.info("client terminated", .{});
                 return;
             },
             types.MessageType.sync => {
-                msg.sendReadyForQuery(&writer.interface, conn_state.transaction_status);
+                msg.sendReadyForQuery(&writer.interface, conn_state.transaction_status) catch return;
             },
             types.MessageType.flush => {
                 writer.interface.flush() catch return;
@@ -133,30 +135,35 @@ fn handleClient(io: Io, stream: Io.net.Stream) Io.Cancelable!void {
     std.log.info("client disconnected", .{});
 }
 
-fn handleQuery(writer: *Io.Writer, conn_state: *ConnectionState, query: []const u8) void {
-    const first = if (query.len > 0) std.ascii.toLower(query[0]) else 0;
+fn handleQuery(writer: *Io.Writer, conn_state: *ConnectionState, query: []const u8) msg.WriteError!void {
+    const statements = msg.splitStatements(query, std.heap.page_allocator) catch return;
+    defer std.heap.page_allocator.free(statements);
 
-    if (first == 's') {
-        const columns = [_]types.ColumnDesc{
-            .{ .name = "id", .type_oid = 23, .type_len = 4 },
-            .{ .name = "name", .type_oid = 25, .type_len = -1 },
-        };
+    for (statements) |stmt| {
+        const first = if (stmt.query.len > 0) std.ascii.toLower(stmt.query[0]) else 0;
 
-        const row1 = [_]?[]const u8{ "1", "alice" };
-        const row2 = [_]?[]const u8{ "2", "bob" };
+        if (first == 's') {
+            const columns = [_]types.ColumnDesc{
+                .{ .name = "id", .type_oid = 23, .type_len = 4 },
+                .{ .name = "name", .type_oid = 25, .type_len = -1 },
+            };
 
-        msg.sendRowDescription(writer, &columns);
-        msg.sendDataRow(writer, &row1);
-        msg.sendDataRow(writer, &row2);
-        msg.sendCommandComplete(writer, "SELECT 2");
-    } else if (first == 'i' or first == 'u' or first == 'd') {
-        msg.sendCommandComplete(writer, "INSERT 0 1");
-    } else if (first == 'c') {
-        msg.sendCommandComplete(writer, "CREATE TABLE");
-    } else {
-        msg.sendCommandComplete(writer, "INSERT 0 1");
+            const row1 = [_]?[]const u8{ "1", "alice" };
+            const row2 = [_]?[]const u8{ "2", "bob" };
+
+            try msg.sendRowDescription(writer, &columns);
+            try msg.sendDataRow(writer, &row1);
+            try msg.sendDataRow(writer, &row2);
+            try msg.sendCommandComplete(writer, "SELECT 2");
+        } else if (first == 'i' or first == 'u' or first == 'd') {
+            try msg.sendCommandComplete(writer, "INSERT 0 1");
+        } else if (first == 'c') {
+            try msg.sendCommandComplete(writer, "CREATE TABLE");
+        } else {
+            try msg.sendCommandComplete(writer, "INSERT 0 1");
+        }
     }
 
-    msg.sendReadyForQuery(writer, conn_state.transaction_status);
-    writer.flush() catch return;
+    try msg.sendReadyForQuery(writer, conn_state.transaction_status);
+    try writer.flush();
 }
