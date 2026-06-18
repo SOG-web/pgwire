@@ -5,6 +5,9 @@ const zio = @import("zio");
 pub const std_options_debug_io = zio.debug_io;
 
 const pgwire = @import("pgwire");
+const msg = pgwire.server.message;
+const types = pgwire.types;
+const ConnectionState = pgwire.server.connection.ConnectionState;
 
 pub fn main(init: std.process.Init) !void {
     const arena: std.mem.Allocator = init.arena.allocator();
@@ -46,70 +49,95 @@ fn handleClient(io: Io, stream: Io.net.Stream) Io.Cancelable!void {
     var write_buffer: [8192]u8 = undefined;
     var writer = stream.writer(io, &write_buffer);
 
-    var conn = pgwire.Connection.init(&reader, &writer, std.heap.page_allocator);
-    defer conn.deinit();
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var conn_state = ConnectionState{};
+    conn_state.backend_pid = @intCast(std.os.linux.getpid());
+    conn_state.backend_secret = 12345;
 
     // ─── Startup ───────────────────────────────────────────────────
 
     while (true) {
-        const startup = conn.readStartupMessage() orelse return;
+        const startup = msg.readStartupMessage(&reader.interface, alloc) orelse return;
 
-        if (startup.version == pgwire.types.SSL_REQUEST_CODE) {
+        if (startup.version == types.SSL_REQUEST_CODE) {
             std.log.info("SSLRequest received, declining", .{});
-            conn.declineSSL();
+            msg.declineSSL(&writer.interface);
+            writer.interface.flush() catch return;
             continue;
         }
 
-        if (startup.version == pgwire.types.CANCEL_REQUEST_CODE) {
+        if (startup.version == types.CANCEL_REQUEST_CODE) {
             std.log.info("CancelRequest received, closing", .{});
             return;
         }
 
-        logStartupMessage(startup.version, startup.params);
-        conn.sendAuthOk();
-        conn.sendParameterStatus("server_version", "0.0.0");
-        conn.sendParameterStatus("server_encoding", "UTF8");
-        conn.sendParameterStatus("client_encoding", "UTF8");
-        conn.sendParameterStatus("datestyle", "ISO");
-        conn.sendBackendKeyData(1, 12345);
-        conn.sendReadyForQuery();
-        conn.flush();
+        // Parse startup parameters
+        var pos: usize = 0;
+        while (pos < startup.params.len) {
+            const key_end = std.mem.indexOfScalar(u8, startup.params[pos..], 0) orelse break;
+            const key = startup.params[pos .. pos + key_end];
+            pos += key_end + 1;
+            const val_end = std.mem.indexOfScalar(u8, startup.params[pos..], 0) orelse break;
+            const val = startup.params[pos .. pos + val_end];
+            pos += val_end + 1;
+            conn_state.setParameter(key, val);
+        }
+
+        std.log.info("user: {s}, database: {s}", .{ conn_state.getCurrentUser(), conn_state.getCurrentDatabase() });
+        conn_state.authenticate(types.PROTOCOL_VERSION_3_0);
+
+        msg.sendAuthOk(&writer.interface);
+        msg.sendParameterStatus(&writer.interface, "server_version", "0.0.0");
+        msg.sendParameterStatus(&writer.interface, "server_encoding", "UTF8");
+        msg.sendParameterStatus(&writer.interface, "client_encoding", "UTF8");
+        msg.sendParameterStatus(&writer.interface, "datestyle", "ISO");
+        msg.sendBackendKeyData(&writer.interface, conn_state.backend_pid, conn_state.backend_secret);
+        msg.sendReadyForQuery(&writer.interface, conn_state.transaction_status);
+        writer.interface.flush() catch return;
         break;
     }
 
     // ─── Message loop ──────────────────────────────────────────────
 
-    while (conn.nextMessage()) |message| {
+    while (true) {
+        const message = msg.readMessage(&reader.interface, alloc) orelse break;
+
         switch (message.type) {
-            pgwire.types.MessageType.query => {
-                const query = pgwire.Connection.readQuery(message);
+            types.MessageType.query => {
+                const query = msg.readQuery(message);
                 std.log.info("query: {s}", .{query});
-                handleQuery(&conn, query);
+                conn_state.incrementQueryCount();
+                conn_state.detectTransactionCommand(query);
+                handleQuery(&writer.interface, &conn_state, query);
             },
-            pgwire.types.MessageType.terminate => {
+            types.MessageType.terminate => {
                 std.log.info("client terminated", .{});
                 return;
             },
-            pgwire.types.MessageType.sync => {
-                conn.sendReadyForQuery();
+            types.MessageType.sync => {
+                msg.sendReadyForQuery(&writer.interface, conn_state.transaction_status);
             },
-            pgwire.types.MessageType.flush => {
-                conn.flush();
+            types.MessageType.flush => {
+                writer.interface.flush() catch return;
             },
             else => {},
         }
 
-        conn.resetArena();
+        arena.deinit();
+        arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     }
 
     std.log.info("client disconnected", .{});
 }
 
-fn handleQuery(conn: *pgwire.Connection, query: []const u8) void {
+fn handleQuery(writer: *Io.Writer, conn_state: *ConnectionState, query: []const u8) void {
     const first = if (query.len > 0) std.ascii.toLower(query[0]) else 0;
 
     if (first == 's') {
-        const columns = [_]pgwire.types.ColumnDesc{
+        const columns = [_]types.ColumnDesc{
             .{ .name = "id", .type_oid = 23, .type_len = 4 },
             .{ .name = "name", .type_oid = 25, .type_len = -1 },
         };
@@ -117,33 +145,18 @@ fn handleQuery(conn: *pgwire.Connection, query: []const u8) void {
         const row1 = [_]?[]const u8{ "1", "alice" };
         const row2 = [_]?[]const u8{ "2", "bob" };
 
-        conn.sendRowDescription(&columns);
-        conn.sendDataRow(&row1);
-        conn.sendDataRow(&row2);
-        conn.sendCommandComplete("SELECT 2");
+        msg.sendRowDescription(writer, &columns);
+        msg.sendDataRow(writer, &row1);
+        msg.sendDataRow(writer, &row2);
+        msg.sendCommandComplete(writer, "SELECT 2");
     } else if (first == 'i' or first == 'u' or first == 'd') {
-        conn.sendCommandComplete("INSERT 0 1");
+        msg.sendCommandComplete(writer, "INSERT 0 1");
     } else if (first == 'c') {
-        conn.sendCommandComplete("CREATE TABLE");
+        msg.sendCommandComplete(writer, "CREATE TABLE");
     } else {
-        conn.sendCommandComplete("INSERT 0 1");
+        msg.sendCommandComplete(writer, "INSERT 0 1");
     }
 
-    conn.sendReadyForQuery();
-    conn.flush();
-}
-
-fn logStartupMessage(version: i32, params: []const u8) void {
-    std.log.info("protocol version: {d}.{d}", .{ @divTrunc(version, 65536), @rem(version, 65536) });
-    var pos: usize = 0;
-    while (pos < params.len and params[pos] != 0) {
-        const key_start = pos;
-        while (pos < params.len and params[pos] != 0) : (pos += 1) {}
-        const key = params[key_start..pos];
-        pos += 1;
-        const val_start = pos;
-        while (pos < params.len and params[pos] != 0) : (pos += 1) {}
-        const val = params[val_start..pos];
-        std.log.info("  {s}: {s}", .{ key, val });
-    }
+    msg.sendReadyForQuery(writer, conn_state.transaction_status);
+    writer.flush() catch return;
 }

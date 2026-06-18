@@ -29,6 +29,7 @@ pub const MessageType = struct {
     pub const authentication = 'R';
     pub const backend_key_data = 'K';
     pub const bind_complete = '2';
+    pub const close_complete = '3';
     pub const command_complete = 'C';
     pub const data_row = 'D';
     pub const empty_query_response = 'I';
@@ -84,10 +85,14 @@ pub const ScramState = enum {
 
 // ─── Transaction status constants ──────────────────────────────────
 
-pub const TransactionStatus = struct {
-    pub const idle = 'I';
-    pub const in_transaction = 'T';
-    pub const in_failed_transaction = 'E';
+pub const TransactionStatus = enum(u8) {
+    idle = 'I',
+    in_transaction = 'T',
+    in_failed_transaction = 'E',
+
+    pub fn toChar(self: TransactionStatus) u8 {
+        return @intFromEnum(self);
+    }
 };
 
 // ─── Data type OID constants ───────────────────────────────────────
