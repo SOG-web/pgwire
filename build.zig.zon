@@ -1,0 +1,19 @@
+.{
+    .name = .pgwire,
+    .version = "0.0.0",
+    .fingerprint = 0xcde116db9e36c2, // Changing
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio?ref=v0.14.0#aa860381beb42bc077e24ef304827cbdc23fcef9",
+            .hash = "zio-0.14.0-xHbVVPxFHgBCop4CvfF4u360kzWlHD4FS8Ud-RIkPcZ7",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+    },
+}
